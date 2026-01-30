@@ -1,0 +1,365 @@
+API Reference: Core Models (Community, CommunityUser, Proposal, Vote*)
+
+(*Vote here refers to UserVote subclasses: BooleanVote, SelectVote, ChoiceVote, NumberVote)
+
+------------------------------------------------------------
+Community
+------------------------------------------------------------
+
+Django model: `Community`
+
+Represents a logical community that may span multiple platforms (Slack, Discord, etc.). Many `CommunityPlatform` records point to one `Community`. Policies and documents are attached at this level.
+
+Key Fields / Relations
+
+- `metagov_slug: SlugField`
+  - Identifier for the corresponding Metagov community.
+- Reverse relations (useful in queries, not declared as fields here):
+  - `communityplatform_set`: all `CommunityPlatform` rows for this community.
+  - `communityrole_set`: all `CommunityRole` rows for this community.
+  - `communitydoc_set`: all `CommunityDoc` rows.
+  - `policy_set` (or via manager): all `Policy` rows with `community=this`.
+  - `proposal` access is via `Proposal.policy__community`, exposed through `Community.proposals` property (see below).
+
+Properties and Methods
+
+- `__str__(self) -> str`
+  - Returns default Django string plus `community_name`.
+
+- `community_name (property) -> str`
+  - Returns `ConstitutionCommunity.community_name` for the associated constitutional platform community, or `''` if not present.
+
+- `get_roles(self) -> QuerySet[CommunityRole]`
+  - All roles defined in this community. Backed by `communityrole_set.all()`.
+
+- `get_policies(self, is_active=True) -> QuerySet[Policy]`
+  - All policies for this community, filtered by `is_active`, ordered by `-modified_at`.
+
+- `get_platform_policies(self, is_active=True) -> QuerySet[Policy]`
+  - Shortcut for: `Policy.platform_policies.filter(community=self, is_active=is_active).order_by('-modified_at')`.
+
+- `get_constitution_policies(self, is_active=True) -> QuerySet[Policy]`
+  - Shortcut for: `Policy.constitution_policies.filter(community=self, is_active=is_active).order_by('-modified_at')`.
+
+- `get_trigger_policies(self, is_active=True) -> QuerySet[Policy]`
+  - Trigger policies only: `Policy.objects.filter(community=self, kind=Policy.TRIGGER, is_active=is_active).order_by('-modified_at')`.
+
+- `get_documents(self, is_active=True) -> QuerySet[CommunityDoc]`
+  - All `CommunityDoc`s for this community filtered by `is_active`.
+
+- `constitution_community (property) -> ConstitutionCommunity | None`
+  - Resolves the `ConstitutionCommunity` platform instance attached to this `Community`:
+    - Uses `self.communityplatform_set.instance_of(ConstitutionCommunity).first()`.
+
+- `completed_proposals (property) -> QuerySet[Proposal]`
+  - Up to 50 most recent proposals for this community that are NOT in status `PROPOSED`.
+  - Implemented as:
+    - `self.proposals.filter(~Q(status=Proposal.PROPOSED))[:50]`
+
+- `pending_proposals (property) -> QuerySet[Proposal]`
+  - Up to 50 proposals in status `PROPOSED`.
+  - Implemented as:
+    - `self.proposals.filter(Q(status=Proposal.PROPOSED))[:50]`
+
+- `proposals (property) -> QuerySet[Proposal]`
+  - Base queryset for proposals associated with this community.
+  - Uses `Proposal.objects.select_related("governance_process", "action__initiator", "policy").filter(policy__community=self).order_by('-proposal_time')`.
+  - Use `.pending_proposals` / `.completed_proposals` for common subsets.
+
+- `get_platform_communities(self) -> QuerySet[CommunityPlatform]`
+  - All `CommunityPlatform` instances for this community, *excluding* the constitutional one.
+
+- `get_platform_community(self, name: str) -> CommunityPlatform | None`
+  - Returns the platform community for the given platform name (e.g., `"Slack"`) or `None` if not found.
+
+- `get_members(self) -> QuerySet[CommunityUser]`
+  - All users across all platforms in this community:
+    - `CommunityUser.objects.filter(community__community=self).order_by('readable_name')`.
+
+- `save(self, *args, **kwargs)`
+  - On first save, creates a Metagov community and writes `metagov_slug`.
+
+- `get_governable_actions(self) -> QuerySet[GovernableAction]`
+  - Delegates to `constitution_community.get_governable_actions()[:20]`.
+  - Returns at most 20 governable actions (platform-dependent, uses the constitution plugin).
+
+
+------------------------------------------------------------
+CommunityUser
+------------------------------------------------------------
+
+Django model: `CommunityUser`  
+Inherits from `django.contrib.auth.models.User` and `PolymorphicModel`.
+
+Represents a user on a specific `CommunityPlatform` (Slack user, Discord user, etc.). Each row is a platform-scoped identity.
+
+Key Fields / Relations
+
+- Inherited `User` fields: `username`, `email`, `is_staff`, `is_superuser`, `groups`, `user_permissions`, etc.
+- `readable_name: CharField`
+  - Human-friendly display name.
+- `community: ForeignKey(CommunityPlatform)`
+  - The platform-level community this user belongs to.
+- `access_token: CharField`
+  - Platform-specific access token, if used.
+- `is_community_admin: BooleanField`
+  - Indicates admin status in the community (used to grant extra permissions).
+- `avatar: CharField`
+  - URL to avatar image.
+- `objects: PolymorphicUserManager`
+  - Polymorphic-compatible user manager.
+
+Important reverse / related access:
+
+- `communityuser.proposal_set` does **not** exist directly. Proposals are related to `BaseAction.initiator` (which is a `CommunityUser`), not to `Proposal.user`.
+- Votes use `user: ForeignKey(CommunityUser)` in each vote subclass (see Vote section).
+
+Methods and Properties
+
+- `__str__(self) -> str`
+  - Returns `readable_name` if present, otherwise `username`.
+
+- `find_linked_username(self, platform: str) -> str | None`
+  - Uses Metagov identity service to find a linked account for a different `platform` (platform type string like `"slack"`, `"discord"`, etc.).
+  - Internally:
+    - Resolves Metagov community via `self.community.metagov_slug`.
+    - Calls `identity.get_users(community=..., platform_type=self.community.platform, community_platform_id=self.community.team_id, platform_identifier=self.username)`.
+    - If exactly one user is found, iterates `linked_accounts` and returns matching `platform_identifier` where `account["platform_type"] == platform`.
+  - Raises `Exception` if more than 1 matching user found.
+
+- `get_roles(self) -> list[CommunityRole]`
+  - Returns all `CommunityRole`s (group roles) for this user, but implemented manually:
+    - Iterates `self.community.get_roles()`, then `r.user_set`, matching `u.communityuser.username == self.username`.
+  - Use if you specifically need `CommunityRole` instances in this community context.
+
+- `has_role(self, name: str) -> bool`
+  - Checks if the user has a role with `CommunityRole.role_name == name`.
+  - Implemented via group relation:
+    - `self.groups.filter(communityrole__role_name=name).exists()`.
+
+- `constitution_community (property) -> ConstitutionCommunity`
+  - Returns the constitutional community backing this user’s parent `Community`:
+    - `ConstitutionCommunity.objects.get(community=self.community.community)`.
+
+- `save(self, *args, **kwargs)`
+  - After normal save:
+    - Finds the parent `Community` (via `self.community.community`).
+    - Ensures a base `CommunityRole` exists for that `Community` (`is_base_role=True`, defaults to `"Base Role"`).
+    - Adds this user to that base role.
+    - Ensures an integration-admin role (`Utils.get_or_create_integration_admin_role(community)`).
+    - If `is_community_admin` is `True`, adds the user to the integration-admin role.
+
+
+------------------------------------------------------------
+Proposal
+------------------------------------------------------------
+
+Django model: `Proposal`
+
+Represents the evaluation of a `Policy` against a `BaseAction`. Voting and governance-process state is attached here.
+
+Key Fields / Relations
+
+- `proposal_time: DateTimeField(auto_now_add=True)`
+  - Creation time.
+- `status: CharField`
+  - One of:
+    - `Proposal.PROPOSED` = `"proposed"`
+    - `Proposal.FAILED` = `"failed"`
+    - `Proposal.PASSED` = `"passed"`
+- `policy: ForeignKey(Policy, null=True, on_delete=SET_NULL, editable=False)`
+  - The policy being evaluated. May be `null` if policy was deleted.
+- `action: ForeignKey(BaseAction, on_delete=CASCADE, editable=False)`
+  - The action that triggered this evaluation.
+- `data: OneToOneField(DataStore, null=True, blank=True)`
+  - Arbitrary JSON-like storage scoped to this proposal.
+- `vote_post_id: CharField`
+  - Platform-specific identifier for a voting post (if relevant).
+- `governance_process: ForeignKey(GovernanceProcess, null=True, blank=True, on_delete=SET_NULL)`
+  - Metagov process representing the decision procedure (e.g., external voting workflow).
+
+Reverse relations from votes:
+
+- `booleanvote_set`, `selectvote_set`, `choicevote_set`, `numbervote_set`:
+  - Each vote subclass has `proposal = ForeignKey(Proposal)`, so normal Django reverse names apply.
+
+Methods and Properties
+
+- `__str__(self) -> str`
+  - Human-readable summary: `Proposal {id}: {action} : {policy or "POLICY_DELETED"} ({status})`.
+
+- `vote_url (property) -> str | None`
+  - Returns `self.governance_process.url` if a governance process exists, else `None`.
+
+- `is_vote_closed (property) -> bool`
+  - If `governance_process` is present:
+    - Returns `governance_process.status == "completed"`.
+  - Otherwise:
+    - Returns `self.status != Proposal.PROPOSED`.
+
+- `get_time_elapsed(self) -> datetime.timedelta`
+  - `now - proposal_time`.
+
+Boolean voting helpers
+
+- `get_all_boolean_votes(self, users=None) -> QuerySet[BooleanVote]`
+  - Returns all boolean votes for this proposal.
+  - Optional `users` filter:
+    - If provided: `BooleanVote.objects.filter(proposal=self, user__in=users)`.
+    - Else: all boolean votes for this proposal.
+
+- `get_yes_votes(self, users=None) -> QuerySet[BooleanVote]`
+  - Boolean votes where `boolean_value=True`.
+  - Optional `users` subset as above.
+
+- `get_no_votes(self, users=None) -> QuerySet[BooleanVote]`
+  - Boolean votes where `boolean_value=False`.
+  - Optional `users` subset as above.
+
+Number voting helpers
+
+- `get_all_number_votes(self, users=None) -> QuerySet[NumberVote]`
+  - All `NumberVote`s for this proposal.
+  - Optional `users` subset.
+
+- `get_one_number_votes(self, value: int, users=None) -> QuerySet[NumberVote]`
+  - `NumberVote`s with `number_value == value` for this proposal.
+  - Optional `users` subset.
+
+Select / ranked voting helpers
+
+- `get_all_select_votes(self) -> QuerySet[SelectVote]`
+  - All `SelectVote`s for this proposal.
+
+- `get_select_votes_by_users(self) -> dict[str, dict[str, str]]`
+  - Aggregates select votes per user.
+  - Returns mapping:
+    - `username -> { candidate -> option }`
+  - For each vote:
+    - `outcomes[vote.user.username][vote.candidate] = vote.option`.
+
+- `get_select_votes_by_candidates(self, users=None) -> dict[str, dict[str, list[str]]]`
+  - Aggregates select votes per candidate and option.
+  - Optional `users`: a list of usernames to filter on (`user__username__in=users`).
+  - Return structure:
+    - `candidate -> { option -> [username, ...] }`.
+
+- `get_select_voters(self) -> QuerySet`
+  - Returns unique user IDs of voters for this proposal:
+    - `SelectVote.objects.filter(proposal=self).values_list('user', flat=True).distinct()`.
+
+Choice voting helpers
+
+- `get_choice_votes(self, value=None) -> QuerySet[ChoiceVote]`
+  - If `value` is provided:
+    - Filter on `ChoiceVote.objects.filter(proposal=self, value=value)`.
+  - Else all `ChoiceVote`s for this proposal.
+
+High-level vote dispatch
+
+- `get_active_votes(self)`
+  - Returns "the current vote objects" based on `governance_process` configuration:
+    - Requires `self.governance_process` to be non-null.
+    - If `governance_process.name == "advanced-vote"`:
+      - Returns `self.get_all_select_votes()`.
+    - If `governance_process.name == "emoji-vote"`:
+      - Reads `poll_type = self.governance_process.state.get("poll_type")`.
+      - If `poll_type == "boolean"`: returns `self.get_all_boolean_votes()`.
+      - If `poll_type == "choice"`: returns `self.get_choice_votes()`.
+    - Otherwise returns `None`.
+  - Use when you don’t want to hardcode the vote model and rely on process metadata.
+
+Lifecycle / status helpers
+
+- `save(self, *args, **kwargs)`
+  - On creation (`not self.pk`), auto-creates and attaches a new `DataStore` instance.
+
+- `_pass_evaluation(self)`
+  - Internal helper to mark the proposal as passed:
+    - Sets `status = Proposal.PASSED` and saves.
+    - Emits an actstream action: `action was passed` with `community_id` and `action_codename`.
+    - If `governance_process` exists, calls `self.governance_process.proxy.close()` if implemented.
+
+- `_fail_evaluation(self)`
+  - Internal helper to mark as failed:
+    - Sets `status = Proposal.FAILED` and saves.
+    - Emits an actstream action: `action was failed`.
+    - Closes `governance_process` as above if possible.
+
+
+------------------------------------------------------------
+Votes (UserVote and subclasses)
+------------------------------------------------------------
+
+Base class: `UserVote` (abstract)  
+Concrete subclasses: `SelectVote`, `BooleanVote`, `ChoiceVote`, `NumberVote`
+
+All votes are associated with a `CommunityUser` and a `Proposal`.
+
+Common Fields (UserVote)
+
+- `user: ForeignKey(CommunityUser)`
+  - The user who cast the vote.
+- `proposal: ForeignKey(Proposal)`
+  - The proposal being voted on.
+- `vote_time: DateTimeField(auto_now_add=True)`
+  - Timestamp of vote creation.
+
+Common Methods
+
+- `get_time_elapsed(self) -> datetime.timedelta`
+  - Time elapsed since the vote was cast.
+
+Concrete Vote Types
+
+1. `SelectVote(UserVote)`
+   - Fields:
+     - `candidate: CharField`
+     - `option: CharField`
+   - Use when a user assigns an option/label to each candidate.
+   - `__str__`: `"user : selected option for candidate"`.
+
+2. `BooleanVote(UserVote)`
+   - Fields:
+     - `boolean_value: BooleanField(null=True, choices=[(True, 'Yes'), (False, 'No')], default=True)`
+   - Use for yes/no decisions.
+   - `__str__`: `"user : True/False"`.
+
+3. `ChoiceVote(UserVote)`
+   - Fields:
+     - `value: CharField`
+   - Use for simple single-choice values (string).
+   - `__str__`: `"user : value"`.
+
+4. `NumberVote(UserVote)`
+   - Fields:
+     - `number_value: IntegerField(null=True)`
+   - Use for numeric scores, ratings, etc.
+   - `__str__`: `"user : number_value"`.
+
+Typical Usage Patterns
+
+- Query votes for a proposal directly:
+  - `proposal.booleanvote_set.all()`, `proposal.numbervote_set.all()`, etc., or via `Proposal` helpers.
+- Filter by user:
+  - `BooleanVote.objects.filter(proposal=proposal, user=user)`.
+
+------------------------------------------------------------
+Notes on Relationships and Access Patterns
+------------------------------------------------------------
+
+- A `Community` is the top-level container.  
+  - Policies (`Policy`), documents (`CommunityDoc`), and proposals (`Proposal` via `policy`) are scoped here.
+
+- A `CommunityPlatform` (not one of the requested classes, but relevant) represents a community on a specific platform and has:
+  - `community: ForeignKey(Community)`
+  - `communityuser_set` reverse relation for all users on that platform.
+
+- A `CommunityUser` belongs to **one** `CommunityPlatform` (and thus exactly one `Community` via `community.community`).
+
+- A `BaseAction` occurs in a `CommunityPlatform` and is initiated by a `CommunityUser`.
+
+- A `Proposal` evaluates a `BaseAction` under a `Policy`.
+
+- Votes (UserVote subclasses) are always tied to both `CommunityUser` and `Proposal`.  
+  - Use `Proposal` helper methods for counting and grouping, rather than querying votes manually, where possible.

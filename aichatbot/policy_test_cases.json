@@ -1,0 +1,47 @@
+[
+    {
+      "id": "case_1_majority",
+      "name": "Simple Majority",
+      "description": "Requires a simple majority (more than 50% of cast votes) to pass. If 50% or fewer vote yes, it fails."
+    },
+    {
+      "id": "case_2_unanimous",
+      "name": "Unanimous Consensus",
+      "description": "Requires 100% of the votes cast to be YES. If there is even a single NO vote, the proposal fails immediately."
+    },
+    {
+      "id": "case_3_dictator",
+      "name": "Benevolent Dictator",
+      "description": "If user 'king_arthur' proposes the action, it passes immediately. Otherwise, 'king_arthur' must vote YES for it to pass. If 'king_arthur' votes NO, it fails."
+    },
+    {
+      "id": "case_4_board_approval",
+      "name": "Board Approval",
+      "description": "Only users with the role 'Board Member' are allowed to vote. The proposal passes if the majority of 'Board Member' votes are YES."
+    },
+    {
+      "id": "case_5_jury",
+      "name": "Jury Duty",
+      "description": "A random jury of 3 users is selected to vote. The proposal passes only if at least 2 of the 3 jurors vote YES."
+    },
+    {
+      "id": "case_6_token_weighted",
+      "name": "Token Weighted Voting",
+      "description": "Votes are weighted by the number of tokens a user holds. If the sum of tokens from YES voters exceeds 60% of the total tokens of all voters, it passes."
+    },
+    {
+      "id": "case_7_lazy_consensus",
+      "name": "Lazy Consensus (Time-based Pass)",
+      "description": "If 48 hours have passed since the proposal started and there are NO votes against it (no vetoes), it passes automatically. If someone votes NO, it moves to a majority vote."
+    },
+    {
+      "id": "case_8_timeout_fail",
+      "name": "Majority with Timeout (Time-based Fail)",
+      "description": "Requires a majority vote to pass. However, if the proposal is older than 3 days and still hasn't reached a majority, it should automatically FAIL."
+    },
+    {
+      "id": "case_9_ranked_choice",
+      "name": "Ranked Choice / Sequential",
+      "description": "If no option has >50% first-choice votes, eliminate the lowest option and redistribute votes. (For this test, simply check if the 'winning_option' has >50% support)."
+    }
+  ]

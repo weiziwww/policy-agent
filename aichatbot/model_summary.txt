@@ -1,0 +1,352 @@
+API Reference (excerpt from models.py)
+=====================================
+
+Context
+-------
+This document summarizes the key developer-facing API for:
+
+- `Community`
+- `CommunityUser`
+- `Proposal`
+- `Vote`
+
+Note: the provided snippet ends in the middle of `DataStore` and does **not** contain the `Proposal` or `Vote` class definitions. Those APIs are inferred only where they are referenced. You should inspect the full `models.py` to document `Proposal` and `Vote` exhaustively.
+
+--------------------------------------
+Community
+--------------------------------------
+
+Django model: `class Community(models.Model)`
+
+Represents a logical community that may exist across multiple platforms (Slack, Reddit, etc.) and has associated policies, documents, proposals, and roles.
+
+Key Fields / Relations
+----------------------
+- `metagov_slug: SlugField`
+  - Unique slug for the community in Metagov.
+- Reverse relations (via other models):
+  - `communityplatform_set` → `CommunityPlatform` objects
+  - `communityrole_set` → `CommunityRole` objects (roles within this community)
+  - `communitydoc_set` → `CommunityDoc` objects (documents)
+  - `policy_set`/`Policy.objects.filter(community=...)` → policies
+  - `proposal_set` (aliased via `proposals` property) → `Proposal` objects associated via `policy__community`
+
+Primary Methods / Properties
+----------------------------
+
+- `__str__(self) -> str`
+  - Returns the Django default string (e.g., `"Community object (id)"`) plus the community name: `"<default> <community_name>"`.
+
+- `community_name (property) -> str`
+  - Returns `self.constitution_community.community_name` if a constitution platform exists, otherwise `''`.
+  - Use when you need a human-readable name for the community.
+
+- `get_roles(self) -> QuerySet[CommunityRole]`
+  - Returns all roles in this community.
+  - Usage:
+    ```python
+    roles = community.get_roles()
+    ```
+
+- `get_policies(self, is_active=True) -> QuerySet[Policy]`
+  - Returns policies for this community, filtered by `is_active` and ordered by `modified_at` descending.
+  - Usage:
+    ```python
+    active_policies = community.get_policies()
+    inactive_policies = community.get_policies(is_active=False)
+    ```
+
+- `get_platform_policies(self, is_active=True) -> QuerySet[Policy]`
+  - Returns only "platform" kind policies (`Policy.platform_policies` manager), for this community.
+  - Usage:
+    ```python
+    platform_policies = community.get_platform_policies()
+    ```
+
+- `get_constitution_policies(self, is_active=True) -> QuerySet[Policy]`
+  - Returns only "constitution" kind policies (`Policy.constitution_policies` manager), for this community.
+  - Usage:
+    ```python
+    constitution_policies = community.get_constitution_policies()
+    ```
+
+- `get_trigger_policies(self, is_active=True) -> QuerySet[Policy]`
+  - Returns only trigger policies (`kind=Policy.TRIGGER`) for this community.
+  - Usage:
+    ```python
+    trigger_policies = community.get_trigger_policies()
+    ```
+
+- `get_documents(self, is_active=True) -> QuerySet[CommunityDoc]`
+  - Returns documents in this community filtered by `is_active`.
+  - Usage:
+    ```python
+    docs = community.get_documents()
+    ```
+
+- `constitution_community (property) -> ConstitutionCommunity | None`
+  - Returns the `ConstitutionCommunity` platform object for this community (polymorphic `CommunityPlatform`).
+  - Looks up via `self.communityplatform_set.instance_of(ConstitutionCommunity).first()`.
+  - May return `None` if not created yet.
+
+- `completed_proposals (property) -> QuerySet[Proposal]`
+  - Returns up to 50 proposals for this community where `status != Proposal.PROPOSED`.
+  - Uses `self.proposals` (see below) and excludes the `PROPOSED` status.
+  - Usage:
+    ```python
+    completed = community.completed_proposals
+    ```
+
+- `pending_proposals (property) -> QuerySet[Proposal]`
+  - Returns up to 50 proposals for this community where `status == Proposal.PROPOSED`.
+  - Usage:
+    ```python
+    pending = community.pending_proposals
+    ```
+
+- `proposals (property) -> QuerySet[Proposal]`
+  - Base queryset for proposals in this community.
+  - Internally:
+    ```python
+    Proposal.objects.select_related(
+        "governance_process",
+        "action__initiator",
+        "policy"
+    ).filter(policy__community=self).order_by('-proposal_time')
+    ```
+  - Use this as the starting point for community-level proposal queries:
+    ```python
+    proposals = community.proposals.filter(status=Proposal.PROPOSED)
+    ```
+
+- `get_platform_communities(self) -> QuerySet[CommunityPlatform]`
+  - Returns all platform instances for this community except the constitution platform.
+  - Uses `CommunityPlatform.objects.filter(community=self)` and excludes `constitution_community.pk`.
+  - Usage:
+    ```python
+    platforms = community.get_platform_communities()
+    ```
+
+- `get_platform_community(self, name: str) -> CommunityPlatform | None`
+  - Returns the `CommunityPlatform` for a specific platform name (`platform` field), or `None` if not found.
+  - Performs a Python-level loop over `CommunityPlatform.objects.filter(community=self)`.
+  - Usage:
+    ```python
+    slack = community.get_platform_community("slack")
+    ```
+
+- `get_members(self) -> QuerySet[CommunityUser]`
+  - Returns `CommunityUser` objects whose `community__community == self`, i.e., all users on any platform that belong to this community.
+  - Ordered by `readable_name`.
+  - Usage:
+    ```python
+    members = community.get_members()
+    ```
+
+- `save(self, *args, **kwargs)`
+  - On first save (no `pk` and no `metagov_slug`), creates a Metagov community and stores `metagov_slug` from `metagov.create_community()`.
+  - Then calls `super().save()`.
+
+- `get_governable_actions(self) -> QuerySet[GovernableAction]`
+  - Delegates to `self.constitution_community.get_governable_actions()[:20]`.
+  - Returns up to 20 "governable actions" for this community from the constitution platform.
+  - Usage:
+    ```python
+    actions = community.get_governable_actions()
+    ```
+
+--------------------------------------
+CommunityUser
+--------------------------------------
+
+Django model: `class CommunityUser(User, PolymorphicModel)`
+
+Extends Django’s `User` and `PolymorphicModel`. Represents a user on a specific platform within a broader `Community`.
+
+Key Fields / Relations
+----------------------
+- Inherits all standard `django.contrib.auth.models.User` fields:
+  - `username`, `email`, `password`, `is_superuser`, `groups`, `user_permissions`, etc.
+- Additional fields:
+  - `readable_name: CharField`
+    - A display-friendly name; can be `None`.
+  - `community: ForeignKey(CommunityPlatform)`
+    - The specific platform community this user belongs to (Slack team, Reddit subreddit wrapper, etc.).
+  - `access_token: CharField`
+    - Platform-specific access token, optional.
+  - `is_community_admin: BooleanField`
+    - Whether this user is considered an admin in this community.
+  - `avatar: CharField`
+    - URL to the user’s avatar; optional.
+- Manager:
+  - `objects = PolymorphicUserManager()`
+
+Important reverse/related access:
+- Groups/roles via `self.groups` (Group M2M).
+- `self.constitution_community` property (see below).
+
+Primary Methods / Properties
+----------------------------
+
+- `__str__(self) -> str`
+  - Returns `readable_name` if set, otherwise `username`.
+
+- `find_linked_username(self, platform: str) -> str | None`
+  - Looks up linked accounts for this user across platforms using Metagov Identity.
+  - Uses:
+    - `metagov.get_community(self.community.metagov_slug)`
+    - `identity.get_users(community=..., platform_type=self.community.platform, community_platform_id=self.community.team_id, platform_identifier=self.username)`
+  - If exactly one matched Metagov identity is found, iterates `linked_accounts` and returns `platform_identifier` for the given `platform_type == platform`.
+  - Raises `Exception` if more than one matching user is found.
+  - Returns `None` if no match or no linked account on the requested platform.
+  - Usage:
+    ```python
+    other_platform_username = user.find_linked_username("discord")
+    ```
+
+- `get_roles(self) -> list[CommunityRole]`
+  - Returns a Python list (not QuerySet) of `CommunityRole` instances for this user.
+  - Implementation notes:
+    - Iterates all roles from `self.community.get_roles()`.
+    - For each role `r`, checks `for u in r.user_set.all()`; if `u.communityuser.username == self.username`, includes `r`.
+  - This is relatively inefficient; use `has_role` or `self.groups` when possible.
+  - Usage:
+    ```python
+    roles = community_user.get_roles()
+    ```
+
+- `has_role(self, name: str) -> bool`
+  - Returns `True` if the user has a role (group) with `CommunityRole.role_name == name`.
+  - Implementation:
+    ```python
+    return self.groups.filter(communityrole__role_name=name).exists()
+    ```
+  - Usage:
+    ```python
+    if user.has_role("Moderator"):
+        ...
+    ```
+
+- `constitution_community (property) -> ConstitutionCommunity`
+  - Returns the `ConstitutionCommunity` for the parent `Community` (not platform).
+  - Implementation:
+    ```python
+    from constitution.models import ConstitutionCommunity
+    return ConstitutionCommunity.objects.get(community=self.community.community)
+    ```
+  - This will raise `DoesNotExist` if the constitution community has not been created.
+
+- `save(self, *args, **kwargs)`
+  - Calls `super().save(...)` to persist the user.
+  - Then:
+    - Resolves the **parent** `Community` via `community = self.community.community`.
+    - Ensures a **base role** exists for this community:
+      ```python
+      base_role, _ = CommunityRole.objects.get_or_create(
+          community=community,
+          is_base_role=True,
+          defaults={"role_name": "Base Role"}
+      )
+      base_role.user_set.add(self)
+      ```
+    - Ensures an "integration admin" role exists: `integration_admin_role = Utils.get_or_create_integration_admin_role(community)`.
+    - If `self.is_community_admin` is `True`, adds the user to that integration admin role:
+      ```python
+      if self.is_community_admin:
+          integration_admin_role.user_set.add(self)
+      ```
+  - This means:
+    - Every user is always in the community’s base role.
+    - Community admins also gain integration admin capabilities.
+
+--------------------------------------
+Proposal
+--------------------------------------
+
+**Not present in the provided snippet**, but referenced by `Community`. From those references we can infer:
+
+Key inferred fields / relations
+-------------------------------
+You will need to confirm these in the actual class definition, but the following are referenced:
+
+- `status`
+  - Uses at least one constant: `Proposal.PROPOSED`.
+- `proposal_time`
+  - Used for ordering: `order_by('-proposal_time')`.
+- `policy: ForeignKey(Policy)`
+  - Used via `policy__community=self`.
+- Relation to governance process:
+  - `governance_process: ForeignKey(GovernanceProcess)` (or similar)
+  - Accessed by `select_related("governance_process", ...)`.
+- Relation to action:
+  - `action` with nested `initiator`:
+    - `select_related("action__initiator")` suggests `action` FK with an `initiator` FK or field on the related model.
+
+Likely helper methods (you should verify in the full models file)
+-----------------------------------------------------------------
+Common patterns in this codebase often include helpers such as:
+
+- `get_yes_votes()`, `get_no_votes()`
+- `get_total_votes()`
+- `get_result()`, `is_approved()`, etc.
+
+Because the `Proposal` class is missing from the snippet, you must check its definition to list:
+- Fields (including any `vote_set` or related votes).
+- Helper methods and semantics (e.g., whether `get_yes_votes()` returns a count, a queryset, or both).
+
+--------------------------------------
+Vote
+--------------------------------------
+
+**Not present in the provided snippet.**
+
+You should inspect the `Vote` class definition in the complete `models.py` (or in another file if it’s split) to document:
+
+Key fields
+----------
+Typical in systems like this (to be confirmed):
+
+- Foreign key to `Proposal` (often `proposal = ForeignKey(Proposal, related_name="votes", ...)`).
+- Foreign key to `CommunityUser` or `User` (e.g. `voter`).
+- `value` / `choice` (e.g., yes/no/abstain, numeric weight, etc.).
+- `cast_at` or `created_at` timestamps.
+
+Likely helper relations
+-----------------------
+- `proposal.vote_set` or `proposal.votes` (if `related_name` is set).
+- Per-proposal helpers that aggregate votes (see Proposal section).
+
+Helper methods
+--------------
+Again, must be verified in the actual class:
+
+- Methods for checking if a user has already voted.
+- Methods for counting yes/no/abstain votes.
+- Possibly validation methods to enforce one vote per user, or check eligibility.
+
+--------------------------------------
+How these pieces fit together
+--------------------------------------
+
+- `Community` is the top-level logical construct.
+  - It has multiple `CommunityPlatform` instances (Slack, constitution, etc.).
+  - Policies (`Policy`) and proposals (`Proposal`) are scoped to `Community`.
+  - Documents (`CommunityDoc`) are associated with `Community`.
+
+- `CommunityUser` is a user on a specific `CommunityPlatform`.
+  - Always linked to a base role in the parent `Community`.
+  - May be a community admin, which grants special integration admin role membership.
+  - Has helpers to:
+    - Discover linked accounts via Metagov Identity.
+    - Query roles and role membership.
+
+- `Proposal` (missing here) ties governance processes and actions to policies in a community.
+  - `Community.proposals`, `Community.pending_proposals`, and `Community.completed_proposals` are the main entry points to proposals associated with a community.
+
+- `Vote` (missing here) likely represents individual user choices on a `Proposal`.
+  - Often aggregated via helper methods on `Proposal`.
+
+For complete API coverage of `Proposal` and `Vote`, you need to open the full model definitions and list:
+- All fields.
+- All helper methods (and expected return types).
+- Relationships (especially anything exposing `vote_set` or `votes`).
