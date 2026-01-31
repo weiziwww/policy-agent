@@ -1,0 +1,321 @@
+ [Test Case 1/9]: Simple Majority
+   >> Generating Draft Code...
+   >> Verifying and Fixing...
+   ------------------------------
+def check(proposal, action, users, datetime):
+    # Count yes and no boolean votes
+    yes_votes = proposal.get_yes_votes().count()
+    no_votes = proposal.get_no_votes().count()
+
+    # Store counts in proposal data for reference
+    if proposal.data:
+        proposal.data.set("yes_votes_num", yes_votes)
+        proposal.data.set("no_votes_num", no_votes)
+
+    total_cast = yes_votes + no_votes
+
+    # If no votes have been cast, keep proposal in proposed state
+    if total_cast == 0:
+        return proposal.PROPOSED
+
+    # Simple majority: more than 50% of cast votes must be yes to pass
+    if yes_votes > total_cast / 2:
+        return proposal.PASSED
+
+    # 50% or fewer yes votes means it fails
+    return proposal.FAILED
+   ------------------------------
+
+ [Test Case 2/9]: Unanimous Consensus
+   >> Generating Draft Code...
+   >> Verifying and Fixing...
+   ------------------------------
+def check(proposal, action, users, datetime, variables):
+    # Count yes and no votes
+    yes_votes = proposal.get_yes_votes().count()
+    no_votes = proposal.get_no_votes().count()
+
+    # Store counts in proposal data
+    proposal.data["yes_votes_num"] = yes_votes
+    proposal.data["no_votes_num"] = no_votes
+    proposal.data.save()
+
+    # Any NO vote causes immediate failure
+    if no_votes > 0:
+        return "failed"
+
+    # If there are votes and all are YES, it passes
+    total_votes = yes_votes + no_votes
+    if total_votes > 0 and yes_votes == total_votes:
+        return "passed"
+
+    # Otherwise keep proposal open
+    return "proposed"
+   ------------------------------
+
+ [Test Case 3/9]: Benevolent Dictator
+   >> Generating Draft Code...
+   >> Verifying and Fixing...
+   ------------------------------
+PASSED = "passed"
+FAILED = "failed"
+PROPOSED = "proposed"
+
+def check():
+    # Get the initiator username
+    initiator = action.initiator  # CommunityUser
+    initiator_username = initiator.username
+
+    # If king_arthur proposed the action, it passes immediately
+    if initiator_username == "king_arthur":
+        return PASSED
+
+    # Otherwise, look at king_arthur's boolean votes on this proposal
+    try:
+        king_arthur_user = next(u for u in users if u.username == "king_arthur")
+    except StopIteration:
+        # king_arthur is not in the community; no decision yet
+        return PROPOSED
+
+    # All boolean votes for this proposal by king_arthur
+    king_votes = proposal.get_all_boolean_votes(users=[king_arthur_user])
+
+    # Check if there is at least one YES or NO; latest vote decides
+    king_votes = king_votes.order_by("-vote_time")
+    if not king_votes.exists():
+        return PROPOSED
+
+    latest_vote = king_votes.first()
+    if latest_vote.boolean_value is True:
+        return PASSED
+    if latest_vote.boolean_value is False:
+        return FAILED
+
+    return PROPOSED
+   ------------------------------
+
+ [Test Case 4/9]: Board Approval
+   >> Generating Draft Code...
+   >> Verifying and Fixing...
+   ------------------------------
+def check(proposal, action, users, datetime):
+    from policyengine.models import Proposal as ProposalModel
+
+    PROPOSED = ProposalModel.PROPOSED
+    PASSED = ProposalModel.PASSED
+    FAILED = ProposalModel.FAILED
+
+    # Filter users to only those with the 'Board Member' role
+    board_members = [u for u in users if u.has_role("Board Member")]
+
+    # Get yes/no votes only from board members
+    yes_votes = proposal.get_yes_votes(users=board_members).count()
+    no_votes = proposal.get_no_votes(users=board_members).count()
+    total_votes = yes_votes + no_votes
+
+    # No votes from board members yet -> keep proposed
+    if total_votes == 0:
+        return PROPOSED
+
+    # Majority rule among board-member votes
+    if yes_votes > no_votes:
+        return PASSED
+    elif no_votes > yes_votes:
+        return FAILED
+
+    # Tie -> remains proposed (no majority)
+    return PROPOSED
+   ------------------------------
+
+ [Test Case 5/9]: Jury Duty
+   >> Generating Draft Code...
+   >> Verifying and Fixing...
+   ------------------------------
+from policyengine import PASSED, FAILED, PROPOSED
+import random
+
+def check():
+    # Ensure we have at least 3 users to form a jury
+    if len(users) < 3:
+        return FAILED
+
+    # Get all boolean votes so far
+    all_votes = list(proposal.get_all_boolean_votes())
+
+    # If we haven't yet selected a jury, do it once and store their user IDs in proposal.data
+    jury_user_ids = proposal.data.get("jury_user_ids")
+    if jury_user_ids is None:
+        # Randomly pick 3 distinct users from the provided users list
+        jury = random.sample(users, 3)
+        jury_user_ids = [u.id for u in jury]
+        proposal.data.data["jury_user_ids"] = jury_user_ids
+        proposal.data.save()
+    else:
+        # Reconstruct jury from stored IDs, keeping only those still in users
+        id_set = set(jury_user_ids)
+        jury = [u for u in users if u.id in id_set]
+
+    # Filter votes to those cast by jurors only
+    jury_votes = [v for v in all_votes if v.user_id in jury_user_ids]
+
+    # Count YES and NO votes among jurors
+    yes_votes = len([v for v in jury_votes if v.boolean_value is True])
+    no_votes = len([v for v in jury_votes if v.boolean_value is False])
+
+    # Store current tallies
+    proposal.data.data["jury_yes_votes"] = yes_votes
+    proposal.data.data["jury_no_votes"] = no_votes
+    proposal.data.save()
+
+    # If all 3 jurors have voted, decide outcome
+    jurors_who_voted = set(v.user_id for v in jury_votes)
+    if len(jurors_who_voted) >= 3:
+        if yes_votes >= 2:
+            return PASSED
+        else:
+            return FAILED
+
+    # Otherwise, keep proposal open
+    return PROPOSED
+   ------------------------------
+
+ [Test Case 6/9]: Token Weighted Voting
+   >> Generating Draft Code...
+   >> Verifying and Fixing...
+   ------------------------------
+def check():
+    # Count yes/no votes
+    yes_votes = proposal.get_yes_votes()
+    no_votes = proposal.get_no_votes()
+
+    # Build a mapping of user -> last boolean vote (True/False)
+    user_last_vote = {}
+    for v in yes_votes:
+        user_last_vote[v.user_id] = True
+    for v in no_votes:
+        user_last_vote[v.user_id] = False
+
+    # Helper: get token balance for a user from proposal.data
+    # Assumes balances are stored under key "token_balances" as {user_id: balance}
+    balances = (proposal.data and proposal.data.data.get("token_balances")) or {}
+    def get_tokens(user_id):
+        return balances.get(str(user_id), 0) or balances.get(user_id, 0) or 0
+
+    # Compute total tokens of all voters and total tokens of YES voters
+    total_tokens = 0
+    yes_tokens = 0
+    for user_id, voted_yes in user_last_vote.items():
+        tokens = get_tokens(user_id)
+        total_tokens += tokens
+        if voted_yes:
+            yes_tokens += tokens
+
+    # Store debug info
+    if proposal.data:
+        proposal.data.data["yes_tokens"] = yes_tokens
+        proposal.data.data["total_tokens"] = total_tokens
+        proposal.data.save()
+
+    # If no tokens at all, keep proposal open
+    if total_tokens == 0:
+        return Proposal.PROPOSED
+
+    # Check 60% threshold
+    if yes_tokens > 0.6 * total_tokens:
+        return Proposal.PASSED
+
+    return Proposal.PROPOSED
+   ------------------------------
+
+ [Test Case 7/9]: Lazy Consensus (Time-based Pass)
+   >> Generating Draft Code...
+   >> Verifying and Fixing...
+   ------------------------------
+def check(proposal, action, users, datetime, **kwargs):
+    PASSED = "passed"
+    FAILED = "failed"
+    PROPOSED = "proposed"
+
+    elapsed = proposal.get_time_elapsed()
+    hours_elapsed = elapsed.total_seconds() / 3600.0
+
+    yes_votes = proposal.get_yes_votes().count()
+    no_votes = proposal.get_no_votes().count()
+
+    # If 48+ hours have passed and there are no NO votes, auto-pass
+    if hours_elapsed >= 48 and no_votes == 0:
+        return PASSED
+
+    # If there is at least one NO vote, use majority vote
+    if no_votes > 0:
+        if yes_votes > no_votes:
+            return PASSED
+        else:
+            return FAILED
+
+    return PROPOSED
+   ------------------------------
+
+ [Test Case 8/9]: Majority with Timeout (Time-based Fail)
+   >> Generating Draft Code...
+   >> Verifying and Fixing...
+   ------------------------------
+def check(proposal, action, users, datetime, variables):
+    # Count yes and no votes
+    yes_votes = proposal.get_yes_votes().count()
+    no_votes = proposal.get_no_votes().count()
+    total_votes = yes_votes + no_votes
+
+    # Majority: strictly more yes than no
+    if yes_votes > no_votes:
+        proposal._pass_evaluation()
+        proposal.data.set("yes_votes_num", yes_votes)
+        proposal.data.set("no_votes_num", no_votes)
+        proposal.data.set("total_votes_num", total_votes)
+        return proposal.status
+
+    # Check proposal age using helper
+    age = proposal.get_time_elapsed()
+
+    # Auto-fail if older than 3 days and no majority
+    if age.days >= 3:
+        proposal._fail_evaluation()
+        proposal.data.set("yes_votes_num", yes_votes)
+        proposal.data.set("no_votes_num", no_votes)
+        proposal.data.set("total_votes_num", total_votes)
+        return proposal.status
+
+    # Otherwise still proposed
+    proposal.data.set("yes_votes_num", yes_votes)
+    proposal.data.set("no_votes_num", no_votes)
+    proposal.data.set("total_votes_num", total_votes)
+    return proposal.status
+   ------------------------------
+
+ [Test Case 9/9]: Ranked Choice / Sequential
+   >> Generating Draft Code...
+   >> Verifying and Fixing...
+   ------------------------------
+def check(variables):
+    proposal = variables.proposal
+
+    # Get all choice votes for this proposal
+    votes = proposal.get_choice_votes()
+    total_votes = votes.count()
+
+    # Handle case with no votes
+    if total_votes == 0:
+        return PROPOSED
+
+    # Count votes for the winning_option
+    winning_option = variables.winning_option
+    winning_votes = proposal.get_choice_votes(value=winning_option).count()
+
+    # Check if winning_option has >50% of first-choice votes
+    if winning_votes > total_votes / 2:
+        return PASSED
+
+    # Otherwise, in a full IRV we'd eliminate lowest and redistribute,
+    # but for this test we just fail if no option has >50%.
+    return FAILED
+   ------------------------------
