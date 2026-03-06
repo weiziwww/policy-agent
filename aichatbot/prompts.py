@@ -342,6 +342,44 @@ class PolicyLLMBuddy:
         )
 
         return self._extract_clean_code(response)
+    
+    def fix_code_with_feedback(self, generated_code, execution_feedback, user_description, api_context):
+        system_prompt = f"""
+        You are an expert Python Developer and QA Engineer fixing logic errors in PolicyKit policies.
+        
+        <API_Context>
+        {api_context}
+        </API_Context>
+        
+        <Task>
+        The previous Python code failed the automated test scenarios. 
+        Review the Test Failures provided below and FIX the code logic so it passes all tests.
+        - Ensure you only use attributes/methods from the API Context.
+        - Output ONLY the fixed Python code. No markdown, no explanations.
+        </Task>
+        """
+
+        user_prompt = f"""
+        <User Requirement>
+        {user_description}
+        </User Requirement>
+
+        <Current Code>
+        {generated_code}
+        </Current Code>
+
+        <Test Failures>
+        {execution_feedback}
+        </Test Failures>
+        """
+
+        response = self.llm_client.chat_completion(
+            system_prompt=system_prompt,
+            user_prompt=user_prompt,
+            type="text"
+        )
+        
+        return self._extract_clean_code(response)
     def _extract_clean_code(self, text):
         pattern = r"```python\s*(.*?)\s*```"
         match = re.search(pattern, text, re.DOTALL)
